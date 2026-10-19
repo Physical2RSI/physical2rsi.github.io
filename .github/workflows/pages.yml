@@ -1,0 +1,78 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '3-58/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.source.outputs.changed }}
+    steps:
+      - name: Check out project source
+        uses: actions/checkout@v7
+        with:
+          repository: Physical2RSI/Awesome-Physical2RSI
+          ref: main
+          persist-credentials: false
+      - name: Check for a new source commit
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          source_commit=$(git rev-parse HEAD)
+          echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            published_commit=$(curl --fail --silent --show-error --max-time 20 https://physical2rsi.github.io/_deployment.json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source_commit", ""))') || published_commit=""
+            if [ "$source_commit" = "$published_commit" ]; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Set up Node.js
+        if: steps.source.outputs.changed == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Validate and build public site
+        if: steps.source.outputs.changed == 'true'
+        run: npm run build
+      - name: Record deployed source
+        if: steps.source.outputs.changed == 'true'
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync("dist/_deployment.json", JSON.stringify({source_repository: "Physical2RSI/Awesome-Physical2RSI", source_commit: process.env.SOURCE_COMMIT}) + "\n");'
+      - name: Upload public site
+        if: steps.source.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+          include-hidden-files: true
+  deploy:
+    if: needs.build.outputs.changed == 'true'
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy public site
+        id: deployment
+        uses: actions/deploy-pages@v5
